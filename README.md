@@ -3,7 +3,7 @@
 **Agents write most of the pull requests now. The simulator still boots one at a time.**
 
 Linear published the clearest write-up yet of what agent-authored code did to their
-pipeline: test suites quadrupled since January, roughly two thousand new tests a week,
+pipeline: test suites almost quadrupled since January, roughly two thousand new tests a week,
 and CI stopped being a set of slow jobs and became *the* constraint on shipping. Their
 fix rested on one lever — drive the fixed cost per shard down (110–140s → ~40s), *then*
 go from four shards to eight. ([Linear: AI coding has made CI a bottleneck][linear] ·
@@ -202,27 +202,40 @@ under-predicts every invoice it produces.
 
 ## Tests that can fail
 
-87 XCTest cases across 8 suites. The ones worth naming are the ones that would pass
-against a gutted implementation if they were written the lazy way — so they weren't:
+95 XCTest cases across 8 suites. A test that would still pass against a gutted
+implementation is worse than no test, because it reads like coverage — so each of these
+was checked by actually breaking the thing it guards and confirming it goes red:
 
-| Test | What it would catch |
+| Test | The mutation it kills |
 |---|---|
-| `testStarvationAuditorDistinguishesAgingFromNoAging` | Runs the auditor twice, same load, same victim, differing only in `agingThreshold`. Asserts it reports starvation-free **with** aging (after exactly 4 deferrals) and **detects starvation without it**. An auditor that passed both would be measuring nothing. |
-| `testLPTBeatsRoundRobinOnMakespanAndBalance` | Runs `NaiveRoundRobinPlanner` over identical input and asserts LPT is strictly better (880s vs 980s) with equal runner-time. Fails if `ShardPlanner` is quietly round-robin. |
-| `testMakespanCurveHasAFloorAndRisesAfterIt` | Pins the whole thesis: 8 shards is slower *and* dearer than 4 in a 4-wide pool. |
-| `testStaleTokenCannotStealTheSuccessorsDevice` | Plays the zombie scenario end to end. Delete the token comparison and the release succeeds, stealing a running job's device. |
-| `testDeliberatelyUnsafeAgentTestIsBlocked` | Feeds the contract a deliberately broken test and asserts it **fails**. |
-| `testUnownedPathWidensRatherThanNarrows` | Pins what the unsafe implementation would produce (an *empty* selection), so fail-open fails on `isEmpty`, not merely on a flag. |
-| `testConcurrentPrewarmAndLeasingPreservesInvariants` | Twelve concurrent writers across `prewarm`'s suspension points; asserts every device is accounted for exactly once. |
-| `testPerShardRoundingIsNotTheSameAsRoundingTheTotal` | Rounding the total instead of each shard under-bills by a whole minute. |
-| `testOnlyCoLocationHazardsProducePinnedTargets` | A duplicate test identifier is blocking but **not** pin-fixable — otherwise the planner "solves" a real bug by grouping and the build goes green. |
+| `testStarvationAuditorDistinguishesAgingFromNoAging` | Same auditor, same load, same victim; only `agingThreshold` differs. Asserts starvation-free **with** aging (after exactly 4 deferrals) and **starvation detected without it**. An auditor that passed both would be measuring nothing. |
+| `testLPTBeatsRoundRobinOnMakespanAndBalance` | Swap `ShardPlanner` for `NaiveRoundRobinPlanner` over identical input: 880s vs 980s at equal runner-time. |
+| `testMakespanCurveHasAFloorAndRisesAfterIt` | Give `makespan` unlimited lanes. 8 shards must be slower *and* dearer than 4 in a 4-wide pool. |
+| `testStaleTokenCannotStealTheSuccessorsDevice` | Delete the fencing-token comparison — the zombie's release then succeeds and steals a running job's device. Also killed by recycling a reclaimed device warm. |
+| `testPrewarmRereadsTheWarmTargetAfterEveryAwait` | Cache the "how many do I still need" count before the loop. The first boot reaches back in and releases two devices mid-suspension; a cached count boots 3 instead of 1 and overshoots. Interleaving is forced, not raced. |
+| `testDeviceIsAccountedForAndUnleasableWhileMidBoot` | Move `booting.insert` to *after* the `await`. Observed from inside the boot closure — the only moment the pool is mid-boot. |
+| `testStringPrefixIsNotOwnership` | Replace `isDirectoryPrefix` with `hasPrefix`. The fixture's only root is the *shorter* string, so the longest-prefix sort cannot mask the bug. |
+| `testAZeroCostLowerTierIsNeverADegradationTarget` | Drop `price > 0` from the tier walk — a job then gets "admitted" into a tier that runs nothing and reports green. |
+| `testDuplicateProfilesKeepTheLongerDurationInEitherOrder` | Last-writer-wins dedupe. Only the reversed ordering discriminates. |
+| `testCurveSamplesHaveDistinctShardCounts` | Emit one curve sample per *requested* count. With two bundles pinned, 8 requests collapse to 7 achievable shard counts, and duplicate ids render undefined in a `ForEach`. |
+| `testBaselinesHonourPinning` | Compute `ShardPlanner`'s baselines without the pinning constraint the real plan honours. |
+| `testPlannerBaselinesHonourThePinningConstraint` | The same mutation one layer up, in the wiring the console actually renders: drop `pinnedTogether:` from `VerificationPlanner`'s three baseline calls and `savedVersusMaximumWidth` goes **negative** — the screen reports a strawman as faster than the plan beating it. |
+| `testDeliberatelyUnsafeAgentTestIsBlocked` | Make every hazard advisory. |
+| `testUnownedPathWidensRatherThanNarrows` | Fail open on unowned paths. Pins what the unsafe version produces — an *empty* selection — so it fails on `isEmpty`, not merely on a flag. |
+| `testPerShardRoundingIsNotTheSameAsRoundingTheTotal` | Round the total instead of each shard: under-bills by a whole minute. |
+| `testOnlyCoLocationHazardsProducePinnedTargets` | Make `duplicateIdentifier` pin-fixable — the planner then "solves" a real bug by grouping and the build goes green. |
+
+`testConcurrentPrewarmAndLeasingPreservesInvariants` and
+`testPrewarmRacingReleasesDoesNotDoubleFileADevice` are fuzz-style backstops, not
+mutation tests, and are named here as such: twelve concurrent writers across `prewarm`'s
+suspension points, asserting only that every device stays accounted for exactly once.
 
 ---
 
 ## Installation
 
 ```swift
-.package(url: "https://github.com/rajatslakhina/verification-throughput-kit.git", from: "1.0.0")
+.package(url: "https://github.com/rajatslakhina/verification-throughput-kit.git", from: "1.1.0")
 ```
 
 ```swift
@@ -246,16 +259,20 @@ What actually happened, stated exactly:
 - **`swift build -Xswiftc -warnings-as-errors`** — clean, from a deleted `.build`, zero
   warnings. Enforced in CI on the Linux job rather than asserted here, because a build
   over an up-to-date tree compiles nothing and still prints `Build complete!`.
-- **`swift test`** — 87 tests, 0 failures.
+- **`swift test`** — 95 tests across 8 suites, 0 failures.
 - **Two CI jobs**, both on every push: Linux (`swift:6.0` container, warnings-as-errors,
   build + build-tests + test) and `macos-15` (`swift build` + `swift test`). The macOS job
   exists specifically because the Linux job never compiles
   `Sources/VerificationThroughputUI` — it is behind `#if canImport(SwiftUI)`, so Linux
   skips it entirely. Live results: **[Actions tab](../../actions)**.
-- **The SwiftUI console was not run on a Simulator as part of authoring this repository.**
-  The companion demo app's CI compiles it for an iOS Simulator destination, which proves
-  it builds and links — not that it launched. The demo repo states exactly what did and
-  did not happen.
+- **The companion demo app's CI is green too**, and it is the stronger check: on
+  `macos-15` it resolves this package from GitHub at its released version and then runs
+  `xcodebuild build -destination 'generic/platform=iOS Simulator'`. So
+  `VerificationThroughputUI` is known to compile **for iOS**, not merely for the host.
+- **The SwiftUI console was still never launched on a Simulator.** A compile check boots
+  no device, and no human ran it either. Nobody has seen this UI render. "Compiles for a
+  Simulator" and "ran on a Simulator" are different claims; only the first is true, and
+  the demo repo says so in the same words.
 
 Demo app: **[verification-throughput-kit-demo-app][demo]** — a runnable SwiftUI console
 that consumes this package as a version-pinned remote dependency.
