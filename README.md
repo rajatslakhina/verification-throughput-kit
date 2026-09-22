@@ -217,7 +217,7 @@ was checked by actually breaking the thing it guards and confirming it goes red:
 | `testStringPrefixIsNotOwnership` | Replace `isDirectoryPrefix` with `hasPrefix`. The fixture's only root is the *shorter* string, so the longest-prefix sort cannot mask the bug. |
 | `testAZeroCostLowerTierIsNeverADegradationTarget` | Drop `price > 0` from the tier walk — a job then gets "admitted" into a tier that runs nothing and reports green. |
 | `testDuplicateProfilesKeepTheLongerDurationInEitherOrder` | Last-writer-wins dedupe. Only the reversed ordering discriminates. |
-| `testCurveSamplesHaveDistinctShardCounts` | Emit one curve sample per *requested* count. With two bundles pinned, 8 requests collapse to 7 achievable shard counts, and duplicate ids render undefined in a `ForEach`. |
+| `testCurveSamplesHaveDistinctShardCounts` | Emit one curve sample per *requested* count. Over 8 bundles with two pinned, requests for 1…10 shards collapse to 7 achievable counts, and duplicate ids render undefined in a `ForEach`. |
 | `testBaselinesHonourPinning` | Compute `ShardPlanner`'s baselines without the pinning constraint the real plan honours. |
 | `testPlannerBaselinesHonourThePinningConstraint` | The same mutation one layer up, in the wiring the console actually renders: drop `pinnedTogether:` from `VerificationPlanner`'s three baseline calls and `savedVersusMaximumWidth` goes **negative** — the screen reports a strawman as faster than the plan beating it. |
 | `testDeliberatelyUnsafeAgentTestIsBlocked` | Make every hazard advisory. |
