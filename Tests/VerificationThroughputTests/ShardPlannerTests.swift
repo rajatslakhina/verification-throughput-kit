@@ -176,6 +176,10 @@ final class ShardPlannerTests: XCTestCase {
         XCTAssertEqual(curve[3].makespan, 300_000)   // 4 shards: 180 + 120, one wave
         XCTAssertEqual(curve[7].makespan, 480_000)   // 8 shards: two waves of 240
 
+        // Runner-time for the same three points. Asserted so that every cell of
+        // the table in the README is machine-checked, not just the makespan row.
+        XCTAssertEqual(curve[0].totalRunnerTime, 660_000)
+
         // Slower...
         XCTAssertGreaterThan(curve[7].makespan, curve[3].makespan)
         // ...and dearer.
