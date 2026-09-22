@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux (Swift 6, warnings-as-errors)
+    runs-on: ubuntu-latest
+    container: swift:6.0
+    steps:
+      - uses: actions/checkout@v4
+
+      # A build over an up-to-date tree compiles nothing and still prints
+      # "Build complete!", which is evidence of nothing. Start clean.
+      - name: Clean
+        run: rm -rf .build
+
+      # `-warnings-as-errors` is enforced here, on the platform-agnostic core,
+      # so "zero warnings" is a machine-checked fact rather than a claim in a
+      # README.
+      - name: Build (warnings are errors)
+        run: swift build -Xswiftc -warnings-as-errors
+
+      - name: Build tests (warnings are errors)
+        run: swift build --build-tests -Xswiftc -warnings-as-errors
+
+      - name: Test
+        run: swift test
+
+  macos:
+    name: macOS (compiles the SwiftUI layer)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clean
+        run: rm -rf .build
+
+      # The Linux job never compiles Sources/VerificationThroughputUI — it is
+      # behind `#if canImport(SwiftUI)`. This job is what proves that target
+      # builds at all.
+      - name: Build
+        run: swift build
+
+      - name: Test
+        run: swift test
