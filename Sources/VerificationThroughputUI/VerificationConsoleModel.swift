@@ -79,11 +79,16 @@ public final class VerificationConsoleModel {
         self.workspace = workspace
         self.planner = VerificationPlanner(policy: workspace.policy)
         self.selectedScenarioID = workspace.scenarios.first?.id ?? ""
-        self.tier = .full
+        // `.impacted` rather than `.full` on purpose: at `.full` the change-set
+        // picker — the first control on screen — changes nothing, because the
+        // full tier runs everything regardless. Opening on the tier where
+        // selection actually does work is the difference between a console
+        // that demonstrates something and one that looks broken.
+        self.tier = .impacted
         self.jobClass = .pullRequest
         self.usesOptimalShardCount = true
         self.manualShardCount = 4
-        self.budgetPressurePercent = 55
+        self.budgetPressurePercent = 40
     }
 
     public var selectedScenario: VerificationScenario? {
@@ -187,10 +192,18 @@ struct SyntheticLedger: Sendable {
     func admit(_ request: AdmissionRequest) -> AdmissionOutcome {
         let allowance = policy.allowance(for: request.jobClass)
         let usable = max(0, SaturatingMath.subtract(allowance, preloaded))
+
+        // Same rule as the actor: nothing to verify at the requested tier is a
+        // legitimate no-op admission, but a *lower* tier that costs nothing
+        // would run nothing, and is never a valid degradation target.
+        if request.cost.cost(for: request.desiredTier) == 0 {
+            return .admitted(tier: request.desiredTier, reserved: 0, effectiveClass: request.jobClass)
+        }
+
         var candidate = request.desiredTier
         while true {
             let price = request.cost.cost(for: candidate)
-            if price <= usable {
+            if price > 0 && price <= usable {
                 if candidate == request.desiredTier {
                     return .admitted(tier: candidate, reserved: price, effectiveClass: request.jobClass)
                 }

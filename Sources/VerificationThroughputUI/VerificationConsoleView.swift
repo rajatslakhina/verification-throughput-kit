@@ -27,6 +27,7 @@ public struct VerificationConsoleView: View {
                     scenarioPicker
                     controls
                     headlineNumbers
+                    impactPanel
                     shardPanel
                     curvePanel
                     contractPanel
@@ -130,11 +131,52 @@ public struct VerificationConsoleView: View {
         }
     }
 
+    /// What the change set selected, and — when it could not be narrowed —
+    /// why. Without this the scenario picker is the only control on screen
+    /// whose effect is invisible, which makes the whole selection half of the
+    /// package look like it does nothing.
+    private var impactPanel: some View {
+        card("Change impact") {
+            VStack(alignment: .leading, spacing: 8) {
+                let impact = model.plan.impact
+                HStack(spacing: 12) {
+                    metric("Bundles selected", "\(model.plan.selectedProfiles.count)", .primary)
+                    metric("Reachable", "\(impact.impactedTestTargets.count)", .secondary)
+                    metric("Tier", model.plan.tier.description, .secondary)
+                }
+
+                if impact.wasConservativelyWidened {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Circle().fill(Color.orange).frame(width: 6, height: 6)
+                        Text("Could not narrow this run: \(impact.unattributedPaths.joined(separator: ", ")) belongs to no target, so the plan widened to the whole suite rather than guessing.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                } else if impact.impactedTestTargets.isEmpty {
+                    Text("No test bundle can observe this change. Every changed path was either owned by a target with no test bundle above it, or classified as inert.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+
+                if model.plan.selectedProfiles.isEmpty {
+                    Text("Nothing selected at this tier.")
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text(model.plan.selectedProfiles.map(\.id.rawValue).joined(separator: ", "))
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+    }
+
     private var shardPanel: some View {
         card("Shard packing") {
             VStack(alignment: .leading, spacing: 10) {
                 if model.plan.shardPlan.shards.isEmpty {
-                    Text("This change set reaches no test bundle. Nothing to run — and that is a decision the planner is willing to defend, because every changed path was attributed to a target.")
+                    Text("Nothing to run at this tier — no bundle was selected, so no shard is created and no simulator boots. That is a decision the planner will defend: see the change-impact panel above for why the selection is empty.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
