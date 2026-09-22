@@ -147,9 +147,15 @@ public struct VerificationPlanner: Sendable {
             selectedProfiles: selected,
             shardCountCurve: curve,
             projectedCost: policy.costModel.cost(of: shardPlan, on: policy.runnerClass),
-            fullSuiteSerialMakespan: planner.serialMakespan(for: allProfiles),
-            selectedSerialMakespan: planner.serialMakespan(for: selected),
-            maximallyParallelMakespan: planner.maximallyParallelMakespan(for: selected)
+            // Every baseline honours the same pinning constraint the real plan
+            // does. Computing them unpinned would report a strawman as faster
+            // than the plan that beat it.
+            fullSuiteSerialMakespan: planner.serialMakespan(for: allProfiles, pinnedTogether: pinned),
+            selectedSerialMakespan: planner.serialMakespan(for: selected, pinnedTogether: pinned),
+            maximallyParallelMakespan: planner.maximallyParallelMakespan(
+                for: selected,
+                pinnedTogether: pinned
+            )
         )
     }
 

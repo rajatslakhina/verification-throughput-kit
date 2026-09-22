@@ -200,11 +200,25 @@ public actor AdmissionController {
         let allowance = policy.allowance(for: effectiveClass)
         let usable = max(0, SaturatingMath.subtract(allowance, used))
 
+        // A zero-priced *desired* tier means there is genuinely nothing to
+        // verify — an inert change set, say. Admitting a no-op is the correct
+        // answer and costs nothing.
+        if request.cost.cost(for: request.desiredTier) == 0 {
+            clearDeferral(for: request.id)
+            return .admitted(tier: request.desiredTier, reserved: 0, effectiveClass: effectiveClass)
+        }
+
         // Walk down from what was asked for to the configured floor.
         var candidate = request.desiredTier
         while true {
             let price = request.cost.cost(for: candidate)
-            if price <= usable {
+            // `price > 0` is load-bearing, not defensive. A *lower* tier that
+            // costs nothing is a tier that would run nothing, and degrading
+            // into it is not a degradation — it is a silent skip that reports
+            // green having tested nothing, which is the worst output this
+            // system can produce. If the tier the caller actually wants does
+            // not fit, waiting for budget is the honest answer.
+            if price > 0 && price <= usable {
                 reserve(price, now: now)
                 clearDeferral(for: request.id)
                 if candidate == request.desiredTier {
@@ -250,6 +264,14 @@ public actor AdmissionController {
         SaturatingMath.divide(now, by: policy.bucketSize)
     }
 
+    /// Drops buckets older than one window.
+    ///
+    /// Keeps everything *above* the cutoff, which means the bound on ledger
+    /// size assumes `now` never moves backwards. That is a real assumption and
+    /// it is deliberate: the caller owns the clock, and a scheduler fed a
+    /// rewound clock has a bigger problem than ledger growth. Buckets from a
+    /// future `now` are retained rather than discarded, so a clock that jumps
+    /// forward and back does not silently free budget that was reserved.
     private func prune(now: Milliseconds) {
         let cutoff = bucketIndex(for: SaturatingMath.subtract(now, policy.windowLength))
         buckets = buckets.filter { $0.key > cutoff }

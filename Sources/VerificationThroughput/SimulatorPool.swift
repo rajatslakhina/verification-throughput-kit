@@ -197,16 +197,24 @@ public actor SimulatorPool {
     ///
     /// This is the one genuinely reentrant method in the pool: `boot` suspends,
     /// and while it is suspended other callers run `acquire` and `release`
-    /// against this same actor. Two rules follow, and both are load-bearing:
+    /// against this same actor. Two rules follow, and each has a test that
+    /// fails if you break it:
     ///
-    /// 1. The candidate is moved into `booting` **before** the `await`, so a
-    ///    concurrent `acquire` cannot hand out a device that is mid-boot.
+    /// 1. The candidate moves into `booting` **before** the `await`, so during
+    ///    the suspension it is accounted for exactly once and a concurrent
+    ///    `acquire` cannot hand out a half-booted device.
+    ///    (`testDeviceIsAccountedForAndUnleasableWhileMidBoot`)
     /// 2. The loop condition is re-evaluated **after** every `await` rather
     ///    than a `needed` count being computed once up front. Caching it is the
-    ///    classic actor-reentrancy bug: a concurrent `acquire` draining `warm`
-    ///    during the suspension would leave the pool permanently under target,
-    ///    and a concurrent `release` refilling it would leave the pool booting
-    ///    devices it no longer needs.
+    ///    classic actor-reentrancy bug: a concurrent `release` refilling `warm`
+    ///    during the suspension leaves the pool booting devices it no longer
+    ///    needs and overshooting its target.
+    ///    (`testPrewarmRereadsTheWarmTargetAfterEveryAwait`)
+    ///
+    /// The `stillUnowned` re-check below is **not** a third rule — it is
+    /// redundant given rule 1, because nothing can claim a device parked in
+    /// `booting`. It is kept as a cheap assertion against a future change that
+    /// weakens rule 1, and it is deliberately not described as load-bearing.
     ///
     /// - Returns: the number of devices successfully booted by this call.
     @discardableResult
@@ -244,8 +252,8 @@ public actor SimulatorPool {
             // --- Everything above this line may be stale. Re-check. ---
             booting.remove(candidate)
 
-            // The device could have been leased out or reclaimed while we were
-            // suspended; only file it if it is genuinely unaccounted for.
+            // Redundant given rule 1 (see above): nothing can claim a device
+            // parked in `booting`. Kept as a cheap assertion, not relied upon.
             let stillUnowned = leases[candidate] == nil
                 && !warm.contains(candidate)
                 && !cold.contains(candidate)

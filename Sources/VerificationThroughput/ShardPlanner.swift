@@ -227,6 +227,14 @@ public struct ShardPlanner: Sendable {
     }
 
     /// The makespan/cost curve from 1 shard up to `maxShards`.
+    ///
+    /// Each sample is a *distinct achievable* shard count. Requesting more
+    /// shards than there are packing items produces the same plan — and
+    /// pinning collapses several bundles into one item, so the achievable
+    /// maximum is often below `profiles.count`. Those repeats are dropped:
+    /// they are not separate points on the curve, and emitting them would give
+    /// two samples the same identity (which, among other things, makes them
+    /// unusable as a `ForEach` id).
     public func makespanCurve(
         for profiles: [TestTargetProfile],
         maxShards: Int,
@@ -234,14 +242,20 @@ public struct ShardPlanner: Sendable {
     ) -> [ShardCountSample] {
         guard !profiles.isEmpty else { return [] }
         let ceiling = max(1, min(maxShards, profiles.count))
-        return (1...ceiling).map { count in
+        var samples: [ShardCountSample] = []
+        var seen: Set<Int> = []
+        for count in 1...ceiling {
             let candidate = plan(profiles, shardCount: count, pinnedTogether: pinnedTogether)
-            return ShardCountSample(
-                shardCount: candidate.shardCount,
-                makespan: candidate.makespan,
-                totalRunnerTime: candidate.totalRunnerTime
+            guard seen.insert(candidate.shardCount).inserted else { continue }
+            samples.append(
+                ShardCountSample(
+                    shardCount: candidate.shardCount,
+                    makespan: candidate.makespan,
+                    totalRunnerTime: candidate.totalRunnerTime
+                )
             )
         }
+        return samples
     }
 
     /// The shard count with the lowest makespan, preferring fewer shards on a
@@ -263,15 +277,27 @@ public struct ShardPlanner: Sendable {
 
     /// Makespan of the strawman every team reaches for first: one shard per
     /// bundle, each paying its own boot, queued against a finite pool.
-    public func maximallyParallelMakespan(for profiles: [TestTargetProfile]) -> Milliseconds {
+    ///
+    /// `pinnedTogether` is **not** optional in spirit even though it has a
+    /// default: a baseline computed without the pinning constraint that the
+    /// real plan has to honour is not a baseline, it is a different problem.
+    /// Reported side by side, it makes the chosen plan look worse than a
+    /// strawman it is in fact beating.
+    public func maximallyParallelMakespan(
+        for profiles: [TestTargetProfile],
+        pinnedTogether: Set<TargetID> = []
+    ) -> Milliseconds {
         guard !profiles.isEmpty else { return 0 }
-        return plan(profiles, shardCount: profiles.count).makespan
+        return plan(profiles, shardCount: profiles.count, pinnedTogether: pinnedTogether).makespan
     }
 
     /// Makespan with no sharding at all.
-    public func serialMakespan(for profiles: [TestTargetProfile]) -> Milliseconds {
+    public func serialMakespan(
+        for profiles: [TestTargetProfile],
+        pinnedTogether: Set<TargetID> = []
+    ) -> Milliseconds {
         guard !profiles.isEmpty else { return 0 }
-        return plan(profiles, shardCount: 1).makespan
+        return plan(profiles, shardCount: 1, pinnedTogether: pinnedTogether).makespan
     }
 }
 
