@@ -1,6 +1,29 @@
 import XCTest
 @testable import VerificationThroughput
 
+/// A one-shot flag, so a `@Sendable` boot closure can act on its first
+/// invocation only without reaching for mutable capture.
+actor OneShot {
+    private var claimed = false
+    func claim() -> Bool {
+        guard !claimed else { return false }
+        claimed = true
+        return true
+    }
+}
+
+struct MidBootObservation: Sendable {
+    let invariantsHold: Bool
+    let isBooting: Bool
+    let isInAFreeList: Bool
+}
+
+actor MidBootLog {
+    private var observations: [MidBootObservation] = []
+    func record(_ observation: MidBootObservation) { observations.append(observation) }
+    func all() -> [MidBootObservation] { observations }
+}
+
 final class SimulatorPoolTests: XCTestCase {
 
     func testWarmAcquisitionSkipsTheBootTax() async throws {
@@ -210,9 +233,88 @@ final class SimulatorPoolTests: XCTestCase {
         XCTAssertTrue(snapshot.leased.isEmpty, "every worker released what it took")
     }
 
-    /// A second concurrent shape: releases racing a prewarm. If `prewarm`
-    /// cached its "how many do I still need" count across the `await`, the pool
-    /// would end up over its warm target or holding a device in two lists.
+    // MARK: - Reentrancy, deterministically
+
+    /// **Kills the cached-count mutation.**
+    ///
+    /// `prewarm` must re-read `warm.count + booting.count < warmTarget` after
+    /// every `await`, not compute "how many do I still need" once up front.
+    /// Here the first boot reaches back into the pool and releases two held
+    /// devices while `prewarm` is suspended — a legal reentrant call, since an
+    /// actor is free to service other work at a suspension point.
+    ///
+    /// Correct: the loop re-reads, sees the target already met, and boots
+    /// exactly one. Cached: it boots three and overshoots the target by two.
+    /// The interleaving is forced, not raced, so this is not flaky.
+    func testPrewarmRereadsTheWarmTargetAfterEveryAwait() async throws {
+        let pool = SimulatorPool(capacity: 5, warmTarget: 3, leaseTTL: 1_000_000)
+        let first = try await pool.acquire(now: 0)
+        let second = try await pool.acquire(now: 0)
+
+        let gate = OneShot()
+        let booted = await pool.prewarm { _ in
+            if await gate.claim() {
+                _ = try? await pool.release(first, now: 1)
+                _ = try? await pool.release(second, now: 1)
+            }
+            return true
+        }
+
+        XCTAssertEqual(
+            booted,
+            1,
+            "prewarm booted \(booted) devices; a cached warm-target count boots 3 and overshoots"
+        )
+        let warm = await pool.warmCount
+        XCTAssertEqual(warm, 3)
+        let holds = await pool.invariantsHold()
+        XCTAssertTrue(holds)
+    }
+
+    /// **Kills the late-`booting.insert` mutation.**
+    ///
+    /// The candidate must be parked in `booting` *before* the `await`, so that
+    /// during the suspension it is accounted for exactly once and cannot be
+    /// handed to a concurrent `acquire`. The only moment that property can be
+    /// observed is from inside the boot closure, so that is where this looks.
+    func testDeviceIsAccountedForAndUnleasableWhileMidBoot() async {
+        let pool = SimulatorPool(capacity: 3, warmTarget: 2, leaseTTL: 1_000_000)
+        let log = MidBootLog()
+
+        _ = await pool.prewarm { candidate in
+            let holds = await pool.invariantsHold()
+            let snapshot = await pool.snapshot()
+            await log.record(
+                MidBootObservation(
+                    invariantsHold: holds,
+                    isBooting: snapshot.booting.contains(candidate),
+                    isInAFreeList: snapshot.warm.contains(candidate) || snapshot.cold.contains(candidate)
+                )
+            )
+            return true
+        }
+
+        let observations = await log.all()
+        XCTAssertEqual(observations.count, 2, "both boots should have been observed")
+        for observation in observations {
+            XCTAssertTrue(
+                observation.invariantsHold,
+                "a device was unaccounted for while mid-boot"
+            )
+            XCTAssertTrue(
+                observation.isBooting,
+                "the candidate must enter `booting` before the await, not after it"
+            )
+            XCTAssertFalse(
+                observation.isInAFreeList,
+                "a half-booted device must not be leasable"
+            )
+        }
+    }
+
+    /// A second concurrent shape: releases racing a prewarm, checked for
+    /// structural consistency afterwards. This one is a fuzz-style backstop —
+    /// the two tests above are what actually pin the reentrancy rules.
     func testPrewarmRacingReleasesDoesNotDoubleFileADevice() async throws {
         let pool = SimulatorPool(capacity: 4, warmTarget: 4, leaseTTL: 1_000_000)
         let held = try await pool.acquire(now: 0)

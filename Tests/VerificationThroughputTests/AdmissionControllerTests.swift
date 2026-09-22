@@ -256,6 +256,58 @@ final class AdmissionControllerTests: XCTestCase {
         XCTAssertEqual(outcome, .admitted(tier: .smoke, reserved: 15_000, effectiveClass: .mergeQueue))
     }
 
+    // MARK: - A tier that runs nothing is not a degradation target
+
+    /// The subtle one. `impacted` costs nothing because the change set reached
+    /// no bundle — so "degrading" `full` → `impacted` would admit a job that
+    /// runs *nothing* and reports green, under budget pressure that should
+    /// have made it wait. Zero-priced lower tiers are skipped, and the job
+    /// waits for the verification it actually asked for.
+    ///
+    /// Drop the `price > 0` condition in `admit` and this fails.
+    func testAZeroCostLowerTierIsNeverADegradationTarget() async {
+        let controller = AdmissionController(policy: policy())
+        _ = await controller.admit(
+            AdmissionRequest(id: "soak", jobClass: .pullRequest, desiredTier: .full, cost: cost(80_000, 80_000, 80_000)),
+            now: 0
+        )
+
+        let outcome = await controller.admit(
+            AdmissionRequest(
+                id: "inert-but-full",
+                jobClass: .pullRequest,
+                desiredTier: .full,
+                // Nothing was impacted, so impacted and smoke both price at 0.
+                cost: cost(0, 0, 90_000)
+            ),
+            now: 0
+        )
+
+        guard case .deferred = outcome else {
+            return XCTFail("a job must never be 'admitted' into a tier that runs nothing — got \(outcome)")
+        }
+    }
+
+    /// The other half: when the tier the caller actually asked for costs
+    /// nothing, there is genuinely nothing to verify and admitting a no-op is
+    /// correct. It must not consume budget and must not be deferred forever.
+    func testAZeroCostDesiredTierIsAdmittedAsANoOp() async {
+        let controller = AdmissionController(policy: policy())
+        let outcome = await controller.admit(
+            AdmissionRequest(
+                id: "docs-only",
+                jobClass: .pullRequest,
+                desiredTier: .impacted,
+                cost: cost(0, 0, 120_000)
+            ),
+            now: 0
+        )
+        XCTAssertEqual(outcome, .admitted(tier: .impacted, reserved: 0, effectiveClass: .pullRequest))
+
+        let used = await controller.utilisation(now: 0)
+        XCTAssertEqual(used, 0, "a no-op must not consume budget")
+    }
+
     func testBackoffGrowsWithAttemptsButIsCapped() async {
         let controller = AdmissionController(policy: policy(budget: 0))
         let request = AdmissionRequest(

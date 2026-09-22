@@ -189,6 +189,48 @@ final class VerificationPlannerTests: XCTestCase {
         XCTAssertFalse(plan.contractReport.isShardSafe)
     }
 
+    /// The planner must hand the pinning constraint to its **baselines**, not
+    /// just to the packer.
+    ///
+    /// `ShardPlannerTests.testBaselinesHonourPinning` covers the packer-level
+    /// API; this covers the wiring in `VerificationPlanner.plan`, which is what
+    /// the console actually renders. Drop `pinnedTogether: pinned` from those
+    /// three baseline calls and the strawman is computed under a constraint the
+    /// real plan has to honour: `maximallyParallelMakespan` drops to 480s
+    /// against a 720s plan, `savedVersusMaximumWidth` goes **negative**, and the
+    /// screen reports "one shard per bundle" as faster than the plan it chose.
+    func testPlannerBaselinesHonourThePinningConstraint() {
+        let unsafeTests = [checkoutTests, checkoutUITests].map { target in
+            TestCaseDescriptor(
+                identifier: "\(target.rawValue).testSharedFixture",
+                targetID: target,
+                declaredTimeout: 4_000,
+                touchesSharedMutableState: true,
+                authorship: .agent(model: "some-model")
+            )
+        }
+
+        let plan = makePlanner().plan(
+            changedPaths: ["Sources/Checkout/Cart.swift"],
+            graph: makeGraph(),
+            profiles: profiles,
+            tests: unsafeTests,
+            tier: .impacted
+        )
+
+        XCTAssertEqual(
+            plan.maximallyParallelMakespan,
+            720_000,
+            "the strawman must honour the same pin; unpinned it computes 480s"
+        )
+        XCTAssertGreaterThanOrEqual(
+            plan.savedVersusMaximumWidth,
+            0,
+            "a baseline must never make the chosen plan look worse than a strawman it satisfies"
+        )
+        XCTAssertEqual(plan.savedVersusMaximumWidth, 0)
+    }
+
     // MARK: - Tiered cost
 
     func testTieredCostIsComputedByPlanningEachTier() {

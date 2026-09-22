@@ -62,10 +62,38 @@ final class ChangeImpactTests: XCTestCase {
         XCTAssertFalse(impact.wasConservativelyWidened)
     }
 
-    /// Prefix matching must be directory-aligned. `Sources/Checkout` is a
-    /// string prefix of `Sources/CheckoutUI/View.swift`, and treating it as an
-    /// owner would attribute every UI change to the wrong module — quietly
-    /// running the wrong bundles forever.
+    /// Prefix matching must be directory-aligned.
+    ///
+    /// The longest-prefix-first sort is *not* enough on its own, and this test
+    /// is built so that it isn't: `Sources/Check` is a strict string prefix of
+    /// `Sources/Checkout/Cart.swift` and is the **only** candidate root, so the
+    /// sort cannot save it. A naive `hasPrefix` attributes the file to `Check`;
+    /// directory-aligned matching correctly attributes it to nobody. Replace
+    /// `isDirectoryPrefix` with `path.hasPrefix(prefix)` and this fails.
+    func testStringPrefixIsNotOwnership() {
+        let graph = BuildGraph(targets: [
+            BuildTarget(id: TargetID("Check"), kind: .library, sourceRoots: ["Sources/Check"]),
+            BuildTarget(
+                id: TargetID("CheckTests"), kind: .testBundle,
+                sourceRoots: ["Tests/CheckTests"], dependencies: [TargetID("Check")]
+            )
+        ])
+
+        // `Sources/Check` must not swallow `Sources/Checkout/...`.
+        XCTAssertNil(graph.owner(ofPath: "Sources/Checkout/Cart.swift"))
+        // ...but it still owns its own directory and the directory itself.
+        XCTAssertEqual(graph.owner(ofPath: "Sources/Check/Thing.swift"), TargetID("Check"))
+        XCTAssertEqual(graph.owner(ofPath: "Sources/Check"), TargetID("Check"))
+
+        // And the consequence the analyser draws from it: an unowned path
+        // widens, rather than being silently attributed to the wrong module.
+        let impact = ChangeImpactAnalyzer().impact(of: ["Sources/Checkout/Cart.swift"], in: graph)
+        XCTAssertTrue(impact.wasConservativelyWidened)
+        XCTAssertEqual(impact.unattributedPaths, ["Sources/Checkout/Cart.swift"])
+    }
+
+    /// The same rule in the richer fixture, where the sort *does* help — kept
+    /// because this is the shape real graphs have.
     func testAdjacentDirectoryNamesAreNotConfused() {
         let graph = makeGraph()
         XCTAssertEqual(graph.owner(ofPath: "Sources/CheckoutUI/View.swift"), TargetID("CheckoutUI"))

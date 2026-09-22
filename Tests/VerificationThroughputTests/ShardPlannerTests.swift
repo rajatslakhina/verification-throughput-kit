@@ -52,14 +52,71 @@ final class ShardPlannerTests: XCTestCase {
         XCTAssertEqual(Set(assigned), Set(profiles.map(\.id)))
     }
 
-    func testDuplicateProfilesKeepTheLongerDuration() {
+    /// Both orderings, because only one of them discriminates. With the longer
+    /// duration last, plain last-writer-wins gives the right answer by
+    /// accident; with it first, last-writer-wins silently halves the estimate.
+    func testDuplicateProfilesKeepTheLongerDurationInEitherOrder() {
         let planner = ShardPlanner(fixedCostPerShard: 0, concurrencyLimit: 4)
-        let plan = planner.plan(
-            [profile("A", 1_000), profile("A", 9_000)],
-            shardCount: 4
+
+        let shortFirst = planner.plan([profile("A", 1_000), profile("A", 9_000)], shardCount: 4)
+        XCTAssertEqual(shortFirst.shardCount, 1)
+        XCTAssertEqual(shortFirst.shards.first?.work, 9_000)
+
+        let longFirst = planner.plan([profile("A", 9_000), profile("A", 1_000)], shardCount: 4)
+        XCTAssertEqual(longFirst.shardCount, 1)
+        XCTAssertEqual(
+            longFirst.shards.first?.work,
+            9_000,
+            "last-writer-wins would report 1000 here and make the bundle look nine times cheaper"
         )
-        XCTAssertEqual(plan.shardCount, 1)
-        XCTAssertEqual(plan.shards.first?.work, 9_000)
+    }
+
+    /// Requesting more shards than there are packing items is not a distinct
+    /// point on the curve, and two samples sharing a shard count would collide
+    /// as an identity (SwiftUI's `ForEach` renders undefined results for
+    /// duplicate ids). Pinning makes this the common case, not a corner one:
+    /// eight bundles with two pinned can only ever produce seven shards.
+    func testCurveSamplesHaveDistinctShardCounts() {
+        let planner = ShardPlanner(fixedCostPerShard: 60_000, concurrencyLimit: 4)
+        let profiles = (1...8).map { profile("T\($0)", $0 * 30_000) }
+        let curve = planner.makespanCurve(
+            for: profiles,
+            maxShards: 10,
+            pinnedTogether: [TargetID("T1"), TargetID("T2")]
+        )
+
+        let counts = curve.map(\.shardCount)
+        XCTAssertEqual(Set(counts).count, counts.count, "duplicate shard counts in the curve: \(counts)")
+        XCTAssertEqual(counts, Array(1...7), "two pinned bundles cap the achievable shard count at 7")
+
+        // Unpinned, all eight are achievable.
+        let unpinned = planner.makespanCurve(for: profiles, maxShards: 10).map(\.shardCount)
+        XCTAssertEqual(unpinned, Array(1...8))
+    }
+
+    /// A baseline computed without the pinning constraint the real plan must
+    /// honour is a different problem, and reporting the two side by side makes
+    /// the chosen plan look worse than a strawman it is actually beating.
+    func testBaselinesHonourPinning() {
+        let planner = ShardPlanner(fixedCostPerShard: 60_000, concurrencyLimit: 4)
+        let profiles = [
+            profile("A", 300_000), profile("B", 300_000),
+            profile("C", 50_000), profile("D", 50_000)
+        ]
+        let pinned: Set<TargetID> = [TargetID("A"), TargetID("B")]
+
+        let unconstrained = planner.maximallyParallelMakespan(for: profiles)
+        let constrained = planner.maximallyParallelMakespan(for: profiles, pinnedTogether: pinned)
+
+        XCTAssertEqual(unconstrained, 360_000)
+        XCTAssertEqual(constrained, 660_000, "A and B must share a shard")
+        XCTAssertGreaterThan(constrained, unconstrained)
+
+        // The real plan honours the pin, so only the constrained baseline is a
+        // fair comparison against it.
+        let actual = planner.plan(profiles, shardCount: 4, pinnedTogether: pinned)
+        XCTAssertEqual(actual.makespan, constrained)
+        XCTAssertGreaterThan(actual.makespan, unconstrained)
     }
 
     func testNegativeDurationsAreClampedAtConstruction() {
